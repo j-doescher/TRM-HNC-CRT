@@ -1,0 +1,363 @@
+#### DESeq2 Analysis using EDGE Seq Count Matrix ###
+### preparation of annotation and count matrix
+# 1.) annotation has to be reformatted
+# 1.1) no empty cells in -> replace empty with "na"
+# 1.2) no spaces -> use: "_"
+# 2.) matrix has to be reformatted
+# 2.1) Delete the header and column names except for the Sample Name (can be changed to Sample_ID)
+# 2.2) Delete the Positive and Negative control probes: ANT, POS and PCL -> list of genes n=1392
+# 3.) save as csv files
+
+### install DESeq2 package
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("DESeq2", force = TRUE)
+
+### set location and load data
+setwd("file_location")
+AllCountData <- read.csv("file_name", row.names=1, stringsAsFactors=F, check.names=F)
+AllSampleData <- read.csv("file_name", row.names=1, stringsAsFactors=F, check.names=F)
+
+### describe what you conditions are just as a reminder
+# Condition_1: Pre vs. Post all patients
+# Condition_2: Pre vs. post treatment non-responder (PR) only
+# Condition_3: Pre vs. post treatment relapse (RM)
+# Condition_4: Pre vs. post responder only
+# Condition_5: Responder vs. non-responder pre treatment only
+# Condition_6: Responder vs. non-responder post treatment only
+# Condition_7: PR vs. RM pre treatment
+# Condition_8: PR vs. RM post treatment
+# Condition_9: Pre vs. post treatment non-responder (all)
+# Condition_10: Healthy vs. Tumor pre
+# Condition_11: Pre vs. post CR and RM 
+
+condition = "Condition_4"
+conditionA = "one"
+conditionB = "two"
+comparision_name = "one-vs-two"
+
+# data transformation for DESeq analysis
+length(which( names(AllCountData) == rownames(AllSampleData) ))
+
+sampleData <- AllSampleData[( AllSampleData$Condition_4 == conditionA ) | 
+                              ( AllSampleData$Condition_4 == conditionB ), ]
+sampleDataA <- AllSampleData[( AllSampleData$Condition_4 == conditionA ), ]
+sampleDataB <- AllSampleData[( AllSampleData$Condition_4 == conditionB ), ]
+
+countData <- AllCountData[,row.names(sampleData)]
+countDataA <- AllCountData[,row.names(sampleDataA)]
+countDataB <- AllCountData[,row.names(sampleDataB)]
+
+countData <- subset(countData, rowSums(countData) > 0)
+length(which( names( countData ) == rownames( sampleData ) ) )
+
+# convert design columns into factors
+sampleData$Condition_4<-as.factor(sampleData$Condition_4)
+sampleData$Patient_ID<-as.factor(sampleData$Patient_ID)
+
+### DESeq2 Analysis ###
+library('DESeq2')
+library('RColorBrewer')
+
+dds <- DESeqDataSetFromMatrix(countData=countData, colData= sampleData, design = ~ Patient_ID + Condition_4)
+
+dds <- estimateSizeFactors(dds)
+counts.Norm <- counts(dds, normalized=TRUE)
+counts.Norm <- data.frame(counts.Norm, check.names=F)
+counts.NormA <- counts.Norm[,row.names(sampleDataA)]
+counts.NormB <- counts.Norm[,row.names(sampleDataB)]
+
+# save the DESeq2 as Rdata
+# save(counts.Norm, file="countDataDEseqNorm.RData")
+# write.csv(counts.Norm, file="Condition_1_countDataDEseqNorm.csv")
+
+# run the DESeq Analysis
+dds <- DESeq(dds)
+
+res <- results(dds, contrast= c( condition, conditionB, conditionA), cooksCutoff=FALSE)
+
+baseMeanA = rowMeans(counts.NormA)
+baseMeanB = rowMeans(counts.NormB)
+results = cbind(as.data.frame(res), baseMeanA, baseMeanB, counts.NormA, counts.NormB)
+
+# save the results attached to the norm. counts
+summ_filename <- paste(condition, "results_with_normalizedCounts_paired.csv", sep="_")
+write.csv(results, file=summ_filename)
+
+head(res)
+resOrd <- res[order(res$padj),]
+
+#summ_filename <- paste(condition, "results.csv", sep="_")
+#write.csv(resOrd, file=summ_filename)
+
+rld <- rlog(dds,fitType = "local")
+
+#create PCA plot with DESeq2 function and ggplot2, adjusting plot with ggpar
+library(ggplot2)
+install.packages("ggpubr")
+library(ggpubr)
+vsdB <- vst(dds,fitType = "local")
+
+data <- plotPCA(vsdB, intgroup = "Timepoint", ntop = 500, returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+
+data_new <- data
+
+data_new$Timepoint <- factor(data_new$Timepoint, levels = c("pre", "post"))
+
+PCA <- qplot(PC1, PC2, color=Timepoint, data=data_new) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  theme_bw() +
+  rremove("grid") 
+
+ggpar(PCA, 
+      title = "Principle component analysis across all samples (n = 60)",
+      palette = c("limegreen", "orange"))  
+
+ggsave("PCA_test.tiff", width = 6, height = 4, device='tiff', dpi=600)
+dev.off()
+
+#Conduct PCA using PCAtools
+library(PCAtools)
+vst <- assay(vsdB)
+p <- pca(vst, metadata = sampleData, removeVar = 0.1) ##removes lower variable based on variance
+
+#Build SCREE plot and determine PCAs to retain
+screeplot(p, axisLabSize = 18, titleLabSize = 22)
+horn <- parallelPCA(vst) ## determine optimum PCAs to retain using Horn´s parallel analysis
+horn$n
+screeplot(p,
+          components = getComponents(p, 1:12),
+          vline = horn$n) +
+  
+  geom_label(aes(x = horn$n + 1, y = 50,
+                 label = 'Horn\'s', vjust = -1, size = 8))
+
+# create pairs plot for further analysing the components
+pairsplot(p,
+          components = getComponents(p, c(1:8)),
+          triangle = TRUE, trianglelabSize = 12,
+          hline = 0, vline = 0,
+          pointSize = 0.4,
+          gridlines.major = FALSE, gridlines.minor = FALSE,
+          colby = 'Timepoint',
+          title = 'Pairs plot', plotaxes = FALSE,
+          margingaps = unit(c(-0.01, -0.01, -0.01, -0.01), 'cm'))
+
+# create biplot for components of interest from pairsplot
+biplot(p,
+       x = 'PC1', y = 'PC2',
+       showLoadings = TRUE,
+       lab = NULL, # insert paste0(p$metadata$Batch) to attach labels
+       colby = 'Timepoint',
+       shape = 'Response',
+       encircle = TRUE, encircleFill = FALSE,
+       encircleAlpha = 1, encircleLineSize = 5,
+       hline = 0, vline = 0,
+       legendPosition = 'right')
+
+#Determine the variables that drive variation among each PC
+plotloadings(p,
+             components = getComponents(p, c(1,2,3)),
+             rangeRetain = 0.01, #indicates the top/bottom % of the loadings range per PC
+             labSize = 4.0,
+             title = 'Loadings plot',
+             subtitle = 'PC1, PC2, PC3',
+             caption = 'Top 1% variables',
+             shape = 24,
+             col = c('limegreen', 'black', 'red3'),
+             drawConnectors = TRUE)
+
+###### Select genes for Heatmap ######
+# select top variable genes for heatmap between conditions 
+topVarGenesCon <- rownames(subset(resOrd, (log2FoldChange < -1.5 | log2FoldChange > 1.5)))
+# select genes with FDR < 0.05 and log2FoldChange > |1.5|
+selected_genes <- rownames(subset(resOrd, (padj <0.05 & log2FoldChange < -0.75 | padj <0.05 & log2FoldChange > 0.75)))
+write.csv(subset(resOrd, (padj <0.05 & log2FoldChange < -0.75 | padj <0.05 & log2FoldChange > 0.75)), file = "My New File.csv", quote=F)
+# select genes of interest
+goi <- c("IL26", "CRTAM", "CXCL13", "TNFRSF9", "DUSP4", "CLEC2B", "HLA-DRA", "NKG7", "IL17A", "CBLB", 
+         "TIGIT", "HLA-DPA1", "HLA-A", "CD7", "STAT3", "PRF1", "SRGN", "HLA-DQA1", "PRDM1", "TNFSF4", 
+         "GZMA", "CTLA4", "IFNG", "HLA-DPB1", "CD74", "GZMB", "ETS1", "ID2", "TNFRSF18", "VCAM1", "ENTPD1",
+         "HLA-DRB1", "PDCD1", "ICOS", "CCL3", "ETV1", "HAVCR2", "KLRD1", "JAML")
+write.csv(resOrd[goi,], file="goi_list_TRM_CR.csv", quote=F)
+
+### Making pheatmap ###
+# install
+install.packages("pheatmap")
+#BiocManager::install("genefilter") #  only if you need the top variable genes
+library("pheatmap")
+#library("genefilter") #  only if you need the top variable genes
+
+# callback function for clustering
+callback = function(hc, mat){
+  sv = svd(t(mat))$v[,1]
+  dend = reorder(as.dendrogram(hc), wts = sv)
+  as.hclust(dend)
+}
+
+# determine your own colours for the annotations
+ann_col <- list(CD103 = c(high = "turquoise", low = "lightpink"), 
+                Timepoint = c(pre = "limegreen", post = "yellow"))
+
+# using top variable genes for heatmap across all samples
+topVarGenes <- head(order(-rowVars(assay(rld))),20)
+mat <- assay(rld)[ topVarGenes, ]
+mat <- mat - rowMeans(mat)
+df <- as.data.frame(colData(rld)["Outcome"])
+
+pheatmap(mat, 
+         scale = "row", 
+         fontsize =10, 
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         border_color = "white",
+         fontsize_row=4.6,
+         show_colnames = F, #  using FALSE to remove the long Sample_IDs
+         clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean",
+         main = "CR vs. PR vs. RM - Pre treatment", 
+         clustering_callback = callback,
+         cutree_cols = 3,
+         annotation_col = df, 
+         annotation_colors = ann_col)
+
+# using selected genes with FDR and Log2FoldChange cut-off
+mat <- assay(vsdB)[selected_genes, ]
+mat <- mat - rowMeans(mat)
+df <- as.data.frame(colData(vsdB)["Timepoint"])
+
+my_heatmap <- pheatmap(mat, #if want to save add my_heatmap <-
+              scale = "row", 
+              fontsize =12, 
+              color = brewer.pal(n = 9, name = "Purples"),
+              border_color = NA,
+              fontsize_row=6,
+              show_colnames = F, #  using FALSE to remove the long Sample_IDs
+              clustering_distance_rows = "euclidean", 
+              clustering_distance_cols = "euclidean",
+              clustering_callback = callback,
+              cutree_cols = 1,
+              annotation_col = df,
+              annotation_colors = ann_col,
+              treeheight_row = 10,
+              treeheight_col = 10)
+
+#add borders to annotation
+library(grid)           
+grid.ls(grid.force())
+grid.gedit("col_annotation", gp = gpar(col="black")) 
+
+#export heatmap as png
+save_pheatmap_png <- function(x, filename, width=4500, height=3600, res = 450) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  grid::grid.ls(grid.force())
+  grid::grid.gedit("col_annotation", gp = gpar(col="black")) 
+}
+
+save_pheatmap_png(my_heatmap, "HM_Cond_1_SelG_vst.png")
+
+dev.off()
+
+# using genes of interest
+mat <- assay(rld)[goi, ]
+mat <- mat - rowMeans(mat)
+df <- as.data.frame(colData(rld)[,c("Timepoint", "CD103")])
+
+my_heatmap <- pheatmap(mat, #if want to save add my_heatmap <-
+         scale = "row", 
+         fontsize =12, 
+         color = brewer.pal(n = 9, name = "Purples"),
+         border_color = NA,
+         fontsize_row=10,
+         show_colnames = F, #  using FALSE to remove the long Sample_IDs
+         clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean",
+         clustering_callback = callback,
+         cutree_cols = 1,
+         annotation_col = df,
+         annotation_colors = ann_col,
+         treeheight_row = 10,
+         treeheight_col = 10)
+
+#add borders to annotation
+library(grid)           
+grid.ls(grid.force())
+grid.gedit("col_annotation", gp = gpar(col="black")) 
+
+#export heatmap as png
+save_pheatmap_png <- function(x, filename, width=4500, height=3600, res = 450) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  grid::grid.ls(grid.force())
+  grid::grid.gedit("col_annotation", gp = gpar(col="black")) 
+}
+
+save_pheatmap_png(my_heatmap, "HM_Cond_4_GoI_TRM_vst.png")
+
+dev.off()
+# Using more goi -> imported gene lists
+#load EDGE Seq gene annotations
+#remove white space behind gene name
+list_genes <- read.csv("Condition_2_selected_genes.csv", header = T)
+colnames(list_genes) # check for gene groups
+
+T_cell_function <- as.vector(list_genes$T.cell.function)
+T_cell_function # check empty values
+T_cell_function <- T_cell_function[-c(11:37)] # delete empty values
+
+#vulcano plot
+BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+
+
+
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                y = 'padj',
+                selectLab = T_cell_function, #to select specifc sets of genes
+                ylim = c(0, 11, na.rm = F),
+                xlim = c(-4,4, na.rm = F), 
+                xlab = bquote(~Log[2]~ 'fold change'),
+                title = element_blank(),
+                subtitle = element_blank(),
+                pCutoff = 0.05,
+                pCutoffCol = 'padj',
+                FCcutoff = 0.75,
+                pointSize = 3.0,
+                labSize = 6.0,
+                col=c('grey', 'grey','grey','#54278F'),
+                colAlpha = 0.5,
+                legendLabels=c('','','Not sig.',
+                               'p-value & Log (base 2) FC'),
+                legendPosition = 'right',
+                legendLabSize = 10,
+                legendIconSize = 5.0,
+                drawConnectors = T,
+                widthConnectors = 0.75)
+
+ggsave("Volcano_Cond_2_T_cell_function.tiff", width = 8, height = 6.7, device='tiff', dpi=600)
+dev.off()
+
+#######################################
+#### Restart Plot Function in case of issues ###
+#turn devices off
+dev.off()
+
+# run a test
+plot(rnorm(50), rnorm(50))
+
+#turn devices off
+dev.off()
+
+#### Clean up the whole Environment ###
+# Clear environment
+rm(list = ls()) 
+
+# Clear console
+cat("\014")  # ctrl+L
+
